@@ -73,3 +73,38 @@ FastMarkerCluster(
 
 m.save('map.html')
 print("Карта сохранена в файл map.html")
+
+import pandas as pd
+from scipy.spatial import KDTree
+
+# 1. Настройка порога (например, 0.5 градуса)
+THRESHOLD = 0.5 
+
+# 2. Поиск ближайших соседей
+tree = KDTree(df_metadata[['longitude', 'latitude']].values)
+dist, idx = tree.query(df[['lon', 'lat']].values)
+
+# 3. Создаем маску совпадений
+mask = dist <= THRESHOLD
+
+# 4. Создаем копию основного фрейма и добавляем временный ключ для связи
+result_df = df.copy()
+result_df['temp_match_idx'] = None
+# Записываем индекс из df_metadata только там, где расстояние в пределах нормы
+result_df.loc[mask, 'temp_match_idx'] = idx[mask]
+
+# 5. Присоединяем метаданные через merge
+# Объединяем по временному ключу и индексу df_metadata
+result_df = result_df.merge(
+    df_metadata, 
+    left_on='temp_match_idx', 
+    right_index=True, 
+    how='left'
+)
+
+# 6. Убираем служебный столбец и добавляем расстояние для контроля
+result_df = result_df.drop(columns=['temp_match_idx'])
+result_df['dist_to_img'] = dist
+
+print(f"Всего точек: {len(result_df)}")
+print(f"Привязано снимков: {mask.sum()}")
