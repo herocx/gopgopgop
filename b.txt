@@ -1,0 +1,83 @@
+import pandas as pd
+
+fire = pd.read_csv("fire.csv", parse_dates=['dt'])
+fire.info()
+
+import psycopg2
+
+connection = psycopg2.connect(user="postgres", password="admin", host="localhost", port=5432, database="tourism")
+cursor = connection.cursor()
+
+fire = fire.values.tolist()
+
+sql_create_table_fire = """
+CREATE TABLE public.fire(
+    dt timestamp,
+    type_name text,
+    type_id integer,
+    lon float,
+    lat float
+);
+"""
+cursor.execute(sql_create_table_fire)
+connection.commit()
+
+for i, row in enumerate(fire): 
+    sql_insert_fire = """ 
+    INSERT INTO public.fire(
+        dt,
+        type_name,
+        type_id,
+        lon,
+        lat
+    )
+    VALUES (%s, %s, %s, %s, %s);
+    """
+    cursor.execute(sql_insert_fire, (row[0], row[1], row[2], row[3], row[4]))
+    connection.commit()
+
+connection.close()
+
+import psycopg2
+import os
+
+# Подключение к базе
+connection = psycopg2.connect(user="postgres", password="admin", host="localhost", port=5432, database="tourism")
+cursor = connection.cursor()
+
+folder_path = 'foto'
+
+sql_create_table_photo = """
+CREATE TABLE IF NOT EXISTS public.photos(
+    id SERIAL PRIMARY KEY,
+    filename TEXT,
+    photo_data BYTEA
+);
+"""
+cursor.execute(sql_create_table_photo)
+connection.commit()
+
+files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))]
+
+for i, filename in enumerate(files):
+    file_path = os.path.join(folder_path, filename)
+
+    with open(file_path, 'rb') as f:
+        binary_data = f.read()
+    
+    sql_insert_photo = """ 
+    INSERT INTO public.photos(
+        filename,
+        photo_data
+    )
+    VALUES (%s, %s);
+    """
+
+    cursor.execute(sql_insert_photo, (filename, binary_data))
+    connection.commit()
+    
+    print(f"Загружен файл {i+1}: {filename}")
+
+cursor.close()
+connection.close()
+
