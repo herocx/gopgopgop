@@ -1,0 +1,75 @@
+import pandas as pd
+df = pd.read_csv("thermopoints.csv", delimiter=";")
+df.info()
+df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
+df.info()
+df.isna().sum()
+df['dt'] = df['dt'].ffill().bfill()
+df
+df.isna().sum()
+df.duplicated().sum()
+df.drop_duplicates(inplace=True)
+df.duplicated().sum()
+df.describe()
+
+import rasterio
+import os
+import glob
+images_folder = 'foto'
+metadata_list = []
+for image_path in glob.glob(os.path.join(images_folder, '*.*')):
+    try:
+        with rasterio.open(image_path) as src:
+            meta = src.meta.copy()
+            meta['file_name'] = os.path.basename(image_path)
+            meta['crs'] = src.crs
+            meta['bounds'] = src.bounds
+            meta['width'] = src.width
+            meta['height'] = src.height
+
+            try:
+                import datetime
+                import time
+                creation_time = os.path.getctime(image_path)
+                meta['creation_date'] = datetime.datetime.fromtimestamp(creation_time).strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                meta['creation_date'] = 'Неизвестна'
+            metadata_list.append(meta)
+    except Exception as e:
+        print(f"Ошибка при чтении {image_path}: {e}")
+
+import pandas as pd
+df_metadata = pd.DataFrame(metadata_list)
+print(df)
+
+from pyproj import Transformer
+import re
+
+# 1. Настройка трансформера (метры -> градусы)
+tf = Transformer.from_crs("EPSG:32637", "EPSG:4326", always_xy=True)
+
+def get_lon_lat(b):
+    nums = [float(x) for x in re.findall(r"[-+]?\d*\.\d+|\d+", str(b))]
+    x, y = (nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2
+    return tf.transform(x, y)
+
+df_metadata[['longitude', 'latitude']] = df_metadata['bounds'].apply(lambda x: get_lon_lat(x)).tolist()
+
+print(df_metadata[['file_name', 'longitude', 'latitude']].head())
+
+import pandas as pd
+import folium
+from folium.plugins import FastMarkerCluster
+
+valid_coords = data.dropna(subset=['latitude', 'longitude'])
+
+map_center = [55.7558, 37.6173]  # Москва
+m = folium.Map(location=map_center, zoom_start=5)
+
+FastMarkerCluster(
+    data=valid_coords[['latitude', 'longitude']].values.tolist(),
+    name="Addresses"
+).add_to(m)
+
+m.save('map.html')
+print("Карта сохранена в файл map.html")
