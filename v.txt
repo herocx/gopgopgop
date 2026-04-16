@@ -1,0 +1,39 @@
+import pandas as pd
+import numpy as np
+
+fires = pd.read_csv('fires_krasnodar.csv', parse_dates=['date'])
+weather = pd.read_csv('weather_data.csv', parse_dates=['date'])
+
+# Если станций много, лучше делать merge по [date, region_id]
+df = pd.merge(fires, weather, on=['date'], how='left')
+
+df['month'] = df['date'].dt.month
+df['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)
+
+# Разделение на классы
+df_majority = data[data.fire_class == 0] # Нет пожара
+df_minority = data[data.fire_class > 0]  # Есть пожар
+
+# Увеличение выборки редких классов
+df_minority_upsampled = resample(df_minority, 
+                                 replace=True,     
+                                 n_samples=len(df_majority), 
+                                 random_state=42)
+
+# Финальный обучающий набор
+train_set = pd.concat([df_majority, df_minority_upsampled])
+
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import train_test_split
+
+# Разделяем признаки (X) и целевую переменную - класс пожара (y)
+X = data.drop(['fire_class', 'date'], axis=1)
+y = data['fire_class']
+
+# Балансировка миноритарных классов
+smote = SMOTE(random_state=42)
+X_res, y_res = smote.fit_resample(X, y)
+
+# Сохранение
+final_df = pd.concat([X_res, y_res], axis=1)
+final_df.to_csv('final_training_set.csv', index=False)
