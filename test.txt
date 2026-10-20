@@ -1,0 +1,130 @@
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import time
+
+BASE = "https://premiaruneta.ru"
+START = BASE + "/news"                      # стартовая страница со списком
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+def get(url):
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    r.encoding = r.apparent_encoding
+    return BeautifulSoup(r.text, "lxml")
+
+def parse_article(url):
+    s = get(url)
+    h1 = s.find("h1")
+    body = s.find("article") or s.find("main")
+    text = "\n".join(p.get_text(strip=True) for p in body.find_all("p")) if body else ""
+    date = s.find("time")
+    return {
+        "company_name":     h1.get_text(strip=True) if h1 else None,
+        "description":      text[:300],
+        "article_text":     text,
+        "publication_date": (date.get("datetime") or date.text) if date else None,
+        "industry":         None,           # заполняем ниже, если найдём номинацию
+        "rating":           None,
+        "source_url":       url,
+        "scraped_at":       pd.Timestamp.utcnow(),
+    }
+
+def main():
+    soup = get(START)
+
+    # 1) ссылки на статьи со стартовой страницы
+    links = [BASE + a["href"] if a["href"].startswith("/") else a["href"]
+             for a in soup.select("a[href]") if "/news/" in a["href"]]
+    links = list(dict.fromkeys(links))       # убираем дубли
+
+    # 2) парсим каждую
+    rows = []
+    for i, url in enumerate(links, 1):
+        print(f"[{i}/{len(links)}] {url}")
+        try:
+            rows.append(parse_article(url))
+        except Exception as e:
+            print("skip:", e)
+        time.sleep(1)                        # вежливая пауза
+
+    # 3) сохраняем
+    df = pd.DataFrame(rows)
+    df.to_csv("dataset.csv", index=False, encoding="utf-8-sig")
+    df.to_json("dataset.json", orient="records", force_ascii=False, indent=2)
+    print(f"Готово: {len(df)} строк")
+
+if __name__ == "__main__":
+    main()
+
+
+columns_to_remove = ['id', 'company', 'description', 'author', 'article_url']
+df_clean = df.drop(columns=columns_to_remove)
+
+df_clean.to_csv('structured_dataset.csv', index=False, sep=';', encoding='utf-8-sig')
+
+#Лемматизация
+import pandas as pd
+import re
+import pymorphy3
+
+data = df_clean
+morph = pymorphy3.MorphAnalyzer()
+
+def clean_text(text):
+    if not isinstance(text, str): return ""
+    words = re.findall(r'[а-яёa-z]+', text.lower())
+    return " ".join([morph.parse(w)[0].normal_form for w in words])
+
+data['cleaned_text'] = data['article_text'].apply(clean_text)
+
+#Токенизация
+import pandas as pd
+import re
+
+def tokenize(text):
+    if not isinstance(text, str): return []
+    return re.findall(r'[а-яёa-z]+', text.lower())
+data['tokens'] = data['article_text'].apply(tokenize)
+
+#Удаление стоп-слов
+import pandas as pd
+import nltk
+from nltk.corpus import stopwords
+
+nltk.download('stopwords')
+russian_stopwords = set(stopwords.words('russian'))
+
+def remove_stopwords(text):
+    if not isinstance(text, str): return ""
+    return " ".join([w for w in text.split() if w not in russian_stopwords])
+
+data['cleaned_text'] = data['cleaned_text'].apply(remove_stopwords)
+data.to_csv('final_dataset.csv', index=False, sep=';', encoding='utf-8-sig')
+
+import pandas as pd
+
+# Создаем целевую переменную target и удаляем старую колонку nomination
+data['target'] = data['nomination']
+data = data.drop(columns=['nomination'])
+
+
+import pymorphy3
+morph = pymorphy3.MorphAnalyzer()
+
+# Список нужных частей речи (существительные, прилагательные, глаголы)
+KEEP_POS = {'NOUN', 'ADJF', 'VERB', 'INFN'}
+
+def lemmatize_and_pos(text):
+    if not isinstance(text, str): return ""
+    words = re.findall(r'[а-яёa-z]+', text.lower())
+    result = []
+    for w in words:
+        p = morph.parse(w)[0]
+        # Оставляем только значимые части речи
+        if p.tag.POS in KEEP_POS: 
+            result.append(p.normal_form)
+    return " ".join(result)
+
+data['cleaned_text_pos'] = data['cleaned_text'].apply(lemmatize_and_pos)
+
+!jupyter nbconvert --to html test.ipynb
