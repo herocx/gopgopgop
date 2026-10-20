@@ -1,0 +1,152 @@
+# ==============================================================================
+# ПОЛНЫЙ ПАЙПЛАЙН: ОТ ПАРСИНГА ДО СОХРАНЕНИЯ ДАННЫХ
+# ==============================================================================
+
+import os
+import re
+import time
+import requests
+import pandas as pd
+import nltk
+import pymorphy3
+from bs4 import BeautifulSoup
+from nltk.corpus import stopwords
+
+# ==============================================================================
+# ШАГ 1. ПАРСИНГ ДАННЫХ (Задание 1.1)
+# ==============================================================================
+print("--- ШАГ 1: ПАРСИНГ ДАННЫХ ---")
+
+BASE = "https://premiaruneta.ru"
+START = BASE + "/news"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+CSV_FILENAME = "runet_nominees.csv"
+
+def get(url):
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    r.encoding = r.apparent_encoding
+    return BeautifulSoup(r.text, "lxml")
+
+def parse_article(url):
+    s = get(url)
+    h1 = s.find("h1")
+    body = s.find("article") or s.find("main")
+    text = "\n".join(p.get_text(strip=True) for p in body.find_all("p")) if body else ""
+    date = s.find("time")
+    return {
+        "company_name":     h1.get_text(strip=True) if h1 else None,
+        "description":      text[:300],
+        "article_text":     text,
+        "publication_date": (date.get("datetime") or date.text) if date else None,
+        "source_url":       url,
+        "scraped_at":       pd.Timestamp.utcnow(),
+    }
+
+# Проверяем, есть ли уже файл. Если нет — запускаем парсер.
+if not os.path.exists(CSV_FILENAME):
+    print("Файл не найден. Запускаем парсер...")
+    soup = get(START)
+    links = [BASE + a["href"] if a["href"].startswith("/") else a["href"]
+             for a in soup.select("a[href]") if "/news/" in a["href"]]
+    links = list(dict.fromkeys(links))
+    
+    rows = []
+    for i, url in enumerate(links, 1):
+        print(f"[{i}/{len(links)}] {url}")
+        try:
+            rows.append(parse_article(url))
+        except Exception as e:
+            print("skip:", e)
+        time.sleep(0.5) # Вежливая пауза
+        
+    df_parsed = pd.DataFrame(rows)
+    df_parsed.to_csv(CSV_FILENAME, index=False, sep=';', encoding='utf-8-sig')
+    print(f"Парсинг завершен. Сохранено {len(df_parsed)} строк.")
+else:
+    print(f"Файл {CSV_FILENAME} уже существует. Используем его.")
+
+# ==============================================================================
+# ШАГ 2. ФОРМИРОВАНИЕ СТРУКТУРЫ (Задание 1.2)
+# ==============================================================================
+print("\n--- ШАГ 2: ФОРМИРОВАНИЕ СТРУКТУРЫ ---")
+
+# Загружаем данные
+df = pd.read_csv(CSV_FILENAME, delimiter=";")
+df = df.drop_duplicates()
+
+# ОБОСНОВАНИЕ ДЛЯ ОТЧЕТА:
+# 1. Целевая переменная (target) — 'nomination' (кластер, который будем предсказывать).
+# 2. Удаляем 'id', 'article_url' — техническая информация, не несет семантики.
+# 3. Удаляем 'author' — автор статьи не влияет на номинацию компании.
+# 4. Удаляем 'description' — дублирует 'article_text'.
+
+columns_to_remove = ['id', 'company', 'description', 'author', 'article_url']
+# Удаляем только те колонки, которые реально есть в датафрейме
+df_clean = df.drop(columns=[c for c in columns_to_remove if c in df.columns])
+
+# Создаем целевую переменную и удаляем исходную колонку
+if 'nomination' in df_clean.columns:
+    df_clean['target'] = df_clean['nomination']
+    df_clean = df_clean.drop(columns=['nomination'])
+
+print("Отобранные колонки:", df_clean.columns.tolist())
+
+# ==============================================================================
+# ШАГ 3. NLP-ОБРАБОТКА: ТОКЕНИЗАЦИЯ, ЛЕММАТИЗАЦИЯ, POS-TAGGING (Задание 1.3)
+# ==============================================================================
+print("\n--- ШАГ 3: NLP-ОБРАБОТКА ---")
+
+data = df_clean.copy()
+morph = pymorphy3.MorphAnalyzer()
+
+# ОБОСНОВАНИЕ ДЛЯ ОТЧЕТА:
+# 1. Токенизация через регулярное выражение r'[а-яёa-z]+' очищает текст от пунктуации и цифр.
+# 2. Используем pymorphy3 для точной лемматизации (приведения к начальной форме).
+# 3. POS-tagging: оставляем только существительные (NOUN), прилагательные (ADJF) и глаголы (VERB, INFN).
+# Это убирает служебные слова и оставляет только смысловое ядро.
+
+KEEP_POS = {'NOUN', 'ADJF', 'VERB', 'INFN'}
+
+def clean_text_and_pos(text):
+    if not isinstance(text, str): return ""
+    words = re.findall(r'[а-яёa-z]+', text.lower())
+    result = []
+    for w in words:
+        p = morph.parse(w)[0]
+        if p.tag.POS in KEEP_POS:
+            result.append(p.normal_form)
+    return " ".join(result)
+
+# Применяем функцию к тексту
+data['cleaned_text'] = data['article_text'].apply(clean_text_and_pos)
+print("Пример обработанного текста:")
+print(data['cleaned_text'].iloc[0][:150] + "...")
+
+# ==============================================================================
+# ШАГ 4. УДАЛЕНИЕ СТОП-СЛОВ И СОХРАНЕНИЕ
+# ==============================================================================
+print("\n--- ШАГ 4: УДАЛЕНИЕ СТОП-СЛОВ И СОХРАНЕНИЕ ---")
+
+nltk.download('stopwords', quiet=True)
+russian_stopwords = set(stopwords.words('russian'))
+
+def remove_stopwords(text):
+    if not isinstance(text, str): return ""
+    return " ".join([w for w in text.split() if w not in russian_stopwords])
+
+# Удаляем стоп-слова
+data['cleaned_text'] = data['cleaned_text'].apply(remove_stopwords)
+
+# Сохраняем финальный датасет
+final_filename = 'final_dataset.csv'
+data.to_csv(final_filename, index=False, sep=';', encoding='utf-8-sig')
+print(f"Финальный датасет сохранен в файл: {final_filename}")
+
+# ==============================================================================
+# ШАГ 5. ЭКСПОРТ В HTML И ИНСТРУКЦИЯ ПО СБОРКЕ АРХИВА (Задание 1.4)
+# ==============================================================================
+print("\n--- ШАГ 5: ЭКСПОРТ И ИНСТРУКЦИЯ ---")
+
+# ВАЖНО: в Jupyter команды терминала пишутся с восклицательным знаком (!).
+# Раскомментируйте строку ниже, чтобы создать HTML-отчет (перед этим сохраните блокнот!).
+# !jupyter nbconvert --to html test.ipynb
