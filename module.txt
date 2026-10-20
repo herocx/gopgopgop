@@ -1,0 +1,173 @@
+# ==============================================================================
+# ЗАДАНИЕ 1.1: ПАРСИНГ ДАННЫХ
+# ==============================================================================
+import os
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import time
+import re
+import nltk
+from nltk.corpus import stopwords
+import pymorphy3
+
+# Настройки парсера
+BASE = "https://premiaruneta.ru"
+START = BASE + "/news"
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+CSV_FILENAME = "runet_nominees.csv"
+
+def get_page(url):
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    r.encoding = r.apparent_encoding
+    return BeautifulSoup(r.text, "lxml")
+
+def parse_article(url):
+    s = get_page(url)
+    h1 = s.find("h1")
+    body = s.find("article") or s.find("main")
+    text = "\n".join(p.get_text(strip=True) for p in body.find_all("p")) if body else ""
+    date = s.find("time")
+    
+    return {
+        "company_name": h1.get_text(strip=True) if h1 else None,
+        "description": text[:300],
+        "article_text": text,
+        "publication_date": (date.get("datetime") or date.text) if date else None,
+        "industry": None, # В реальном проекте заполняется из метаданных статьи
+        "rating": None,
+        "source_url": url,
+        "scraped_at": pd.Timestamp.utcnow(),
+    }
+
+def run_parser():
+    print("Запуск парсера...")
+    soup = get_page(START)
+    links = [BASE + a["href"] if a["href"].startswith("/") else a["href"]
+             for a in soup.select("a[href]") if "/news/" in a["href"]]
+    links = list(dict.fromkeys(links))
+    
+    rows = []
+    for i, url in enumerate(links, 1):
+        print(f"[{i}/{len(links)}] {url}")
+        try:
+            rows.append(parse_article(url))
+        except Exception as e:
+            print("Ошибка:", e)
+        time.sleep(0.5) # Вежливая пауза
+        
+    df_parsed = pd.DataFrame(rows)
+    df_parsed.to_csv(CSV_FILENAME, index=False, sep=';', encoding='utf-8-sig')
+    print(f"Парсинг завершен. Сохранено {len(df_parsed)} строк в {CSV_FILENAME}")
+
+# Если файла нет, запускаем парсер. Если есть — пропускаем, чтобы не нагружать сайт.
+if not os.path.exists(CSV_FILENAME):
+    run_parser()
+else:
+    print(f"Файл {CSV_FILENAME} уже существует. Пропускаем этап парсинга.")
+
+# ==============================================================================
+# ЗАДАНИЕ 1.2: ФОРМИРОВАНИЕ СТРУКТУРЫ НАБОРА ДАННЫХ
+# ==============================================================================
+# Загружаем данные (в вашем ноутбуке был загружен расширенный файл на 127 строк)
+# Здесь мы используем сохраненный парсером файл, но логика остается прежней.
+# Если у вас есть готовый файл на 127 строк с полями sphere и rating, загрузите его вместо этого.
+try:
+    df = pd.read_csv(CSV_FILENAME, delimiter=";")
+except FileNotFoundError:
+    # Заглушка, если парсер не сработал (для демонстрации логики)
+    print("Файл не найден, создаем пустой DataFrame для примера.")
+    df = pd.DataFrame(columns=['id','company','description','sphere','rating','nomination','publication_date','article_title','author','hub','article_url','article_text','word_count'])
+
+df = df.drop_duplicates()
+
+# ОБОСНОВАНИЕ ВЫБОРА АТРИБУТОВ (для отчета):
+# 1. Целевая переменная (target) — это 'nomination', так как задача классификации состоит в определении номинации.
+# 2. Удаляем 'id' — технический идентификатор, не несет смысловой нагрузки.
+# 3. Удаляем 'author' — автор статьи не влияет на принадлежность компании к номинации.
+# 4. Удаляем 'article_url' — ссылка не является текстовым признаком и может вызвать переобучение.
+# 5. Удаляем 'description' — дублирует информацию из 'article_text', оставляем только полный текст.
+columns_to_remove = ['id', 'author', 'article_url', 'description']
+# Оставляем только те колонки, которые есть в df (защита от ошибок, если колонок нет)
+columns_to_remove = [col for col in columns_to_remove if col in df.columns]
+df_clean = df.drop(columns=columns_to_remove)
+
+# Создаем целевую переменную и удаляем исходную колонку номинации
+if 'nomination' in df_clean.columns:
+    df_clean['target'] = df_clean['nomination']
+    df_clean = df_clean.drop(columns=['nomination'])
+
+print("Структура данных после отбора признаков:")
+print(df_clean.columns.tolist())
+
+# ==============================================================================
+# ЗАДАНИЕ 1.3: ПРЕДВАРИТЕЛЬНАЯ ОБРАБОТКА ТЕКСТОВЫХ ДАННЫХ (NLP)
+# ==============================================================================
+nltk.download('stopwords', quiet=True)
+russian_stopwords = set(stopwords.words('russian'))
+morph = pymorphy3.MorphAnalyzer()
+
+# ОБОСНОВАНИЕ МЕТОДОВ (для отчета):
+# 1. Токенизация: используем регулярные выражения `re.findall(r'[а-яёa-z]+', ...)` для извлечения только слов, 
+#    что автоматически удаляет пунктуацию и спецсимволы.
+# 2. Лемматизация: используем pymorphy3, так как он обеспечивает высокую точность нормализации слов для русского языка (в отличие от стемминга).
+# 3. Удаление стоп-слов: используем стандартный список NLTK для русского языка (союзы, предлоги, местоимения), чтобы снизить шум.
+# 4. Выделение значимых частей речи (POS-tagging): Оставляем только существительные (NOUN), прилагательные (ADJF), глаголы (VERB, INFN) 
+#    и причастия. Это позволяет отбросить служебные части речи и сфокусироваться на семантическом ядре текста.
+
+KEEP_POS = {'NOUN', 'ADJF', 'VERB', 'INFN', 'PRTF', 'PRTS', 'GRND'}
+
+def preprocess_text(text):
+    if not isinstance(text, str): 
+        return ""
+    
+    # 1. Токенизация и приведение к нижнему регистру (удаление пунктуации)
+    words = re.findall(r'[а-яёa-z]+', text.lower())
+    
+    result = []
+    for w in words:
+        # 2. Удаление стоп-слов (до лемматизации, чтобы не тратить ресурсы)
+        if w in russian_stopwords:
+            continue
+            
+        # 3. Морфологический анализ (лемматизация + POS-tagging)
+        p = morph.parse(w)[0]
+        if p.tag.POS in KEEP_POS:
+            result.append(p.normal_form)
+            
+    return " ".join(result)
+
+print("Запуск NLP-обработки...")
+# Применяем функцию к тексту статьи
+df_clean['cleaned_text'] = df_clean['article_text'].apply(preprocess_text)
+
+# Добавляем токены (просто для наглядности, как было в вашем ноутбуке)
+df_clean['tokens'] = df_clean['cleaned_text'].apply(lambda x: x.split())
+
+print("Пример обработанного текста:")
+print(df_clean['cleaned_text'].iloc[0][:200] + "...")
+
+# ==============================================================================
+# ЗАДАНИЕ 1.4: ПОДГОТОВКА ОТЧЕТА И СОХРАНЕНИЕ
+# ==============================================================================
+# Сохраняем итоговый датасет
+final_filename = 'final_dataset.csv'
+df_clean.to_csv(final_filename, index=False, sep=';', encoding='utf-8-sig')
+print(f"\nИтоговый датасет сохранен в файл: {final_filename}")
+
+# Для формирования HTML-отчета выполните следующую команду в отдельной ячейке Jupyter:
+# !jupyter nbconvert --to html test.ipynb
+# (Обязательно с восклицательным знаком в начале, чтобы Jupyter воспринял это как команду терминала, а не код Python)
+
+"""
+ИНСТРУКЦИЯ ПО СБОРКЕ АРХИВА (Data.zip):
+1. Сохраните этот блокнот (test.ipynb).
+2. Выполните экспорт в HTML (команда выше).
+3. Создайте файл Readme.txt с описанием: какие библиотеки использовались, как запустить парсер, какие файлы лежат в архиве.
+4. Поместите в архив:
+   - test.ipynb (исходный код)
+   - test.html (отчет)
+   - final_dataset.csv (результат)
+   - Readme.txt (описание)
+5. Заархивируйте все в Data.zip.
+"""
